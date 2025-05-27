@@ -1,3 +1,4 @@
+import gymnasium as gym
 from stable_baselines3 import PPO
 import os
 import glob
@@ -23,3 +24,16 @@ def select(latest, models_dir = "models"):
     print(f"Выбрана {selected_model}")
 
     return selected_model
+
+# Загружаем модель
+model_path = select(latest=True, models_dir = "models")
+model = PPO.load(model_path)
+env = gym.make("LunarLander-v3", render_mode="human")
+obs, _ = env.reset()
+while (1):
+    action, _ = model.predict(obs)
+    observation, reward, terminated, truncated, info = env.step(action)
+    print(reward)
+
+    if terminated or truncated:
+        observation, info = env.reset()

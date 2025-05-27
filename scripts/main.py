@@ -1,5 +1,5 @@
 import pybullet as p
-from BipedWalkerEnv import BipedWalkerEnv  # Кастомная среда
+from RLEnv.BipedWalkerEnv import BipedWalkerEnv  # Кастомная среда
 
 env = BipedWalkerEnv("human")
 

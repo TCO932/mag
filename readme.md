@@ -14,3 +14,13 @@ source myenv/bin/activate  # Активация
 ```bash
 pip install -r requirements.txt
 ```
+
+# Для записи зависимостей
+```bash
+pip freeze > requirements.txt
+```
+
+# Для просмотра логов
+```bash
+tensorboard --logdir=./logs/
+```
