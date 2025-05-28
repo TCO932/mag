@@ -1,0 +1,12 @@
+setup.py
+scripts/__init__.py
+scripts/bipod_test.py
+scripts/check_envs.py
+scripts/learning.py
+scripts/main.py
+scripts/model_choicer.py
+scripts/test.py
+walking_bipod.egg-info/PKG-INFO
+walking_bipod.egg-info/SOURCES.txt
+walking_bipod.egg-info/dependency_links.txt
+walking_bipod.egg-info/top_level.txt
