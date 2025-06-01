@@ -10,7 +10,7 @@ from gymnasium.wrappers import RecordEpisodeStatistics, RecordVideo
 env_name = "BipedWalkerCustom-v1"
 model_name = "BipedWalkerCustom-v4"
 alg = "PPO"
-total_timesteps = 5_000_000
+total_timesteps = 2_000_000
 
 script_dir = os.path.dirname(os.path.abspath(__file__))  # RLEnv/BipedWalkerEnv
 models_dir = os.path.join(script_dir, "models", alg)  # RLEnv/BipedWalkerEnv/models/PPO

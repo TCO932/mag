@@ -6,7 +6,8 @@ import pybullet_data  # Модуль со встроенными моделям�
 import time
 
 target = {
-    "pos": np.array([0., 3., 0.])
+    "pos": np.array([-1., 3., 0.]),
+    "id": None
 }
 max_force = 100
 
@@ -29,14 +30,6 @@ class BipedWalkerEnv(gym.Env):
             p.DIRECT if self.render_mode != "human" else p.GUI)
             
         p.setGravity(0, 0, -9.81)
-
-        p.addUserDebugLine(
-            target["pos"], 
-            [target["pos"][0], target["pos"][1], 3],    # Конечная точка
-            lineColorRGB=[1, 0, 0],  # Цвет (R, G, B) от 0 до 1
-            lineWidth=2,             # Толщина линии
-            lifeTime=0  
-        )
 
         script_dir = os.path.dirname(os.path.abspath(__file__))
         search_path = os.path.join(script_dir, "URDFs")  # RLEnv/BipedWalkerEnv/URDFs
@@ -66,6 +59,28 @@ class BipedWalkerEnv(gym.Env):
             p.resetJointState(self.robot, joint, 0)
 
         self.step_count = 0
+        XY_pos = np.random.randint(2, 5, size=2)
+        X_sign = np.random.choice([-1, 1], size=1)
+        XY_signs = np.append(X_sign, [1])
+        target["pos"] = np.append(XY_pos * XY_signs, [0])
+
+
+        if not target["id"]:
+            target["id"] = p.addUserDebugLine(
+                target["pos"], 
+                [target["pos"][0], target["pos"][1], 3],    # Конечная точка
+                lineColorRGB=[1, 0, 0],  # Цвет (R, G, B) от 0 до 1
+                lineWidth=2,             # Толщина линии
+            )
+        else:
+            p.addUserDebugLine(
+                target["pos"], 
+                [target["pos"][0], target["pos"][1], 3],    # Конечная точка
+                lineColorRGB=[1, 0, 0],  # Цвет (R, G, B) от 0 до 1
+                lineWidth=2,             # Толщина линии
+                replaceItemUniqueId=target["id"]  
+            )
+            
 
         # Возвращаем начальное состояние
         return self._get_obs(), {}
@@ -93,8 +108,7 @@ class BipedWalkerEnv(gym.Env):
         # Проверяем терминальное состояние (падение)
         sim_drt = time.time() - time_before
 
-        reward, target_reached = self._calculate_reward(
-            action, [state[1] for state in p.getJointStates(self.robot, range(6))])
+        reward, target_reached = self._calculate_reward(action)
         
         falled = self._check_fall()
         reward -= 50 if falled else 0
@@ -136,25 +150,12 @@ class BipedWalkerEnv(gym.Env):
 
         ], dtype=np.float32)
         return obs
-
-    def _calculate_reward2(self, action, joint_velocities):
-        # Пример: награда за скорость вперёд
-        # torso_vel = p.getBaseVelocity(self.robot)[0][0]  # Скорость по X
-        # energy = sum(abs(a * v) for a, v in zip(action, joint_velocities))
-        # reward = torso_vel - 0.01 * energy
-
-        torso_pos, _ = p.getBasePositionAndOrientation(self.robot)
-        dist = np.linalg.norm(target["pos"][:2])
-        current_dist = np.linalg.norm(torso_pos[:2] - target["pos"][:2])
-        rel_dist = current_dist/dist
-        norm_dist = current_dist/dist if rel_dist < 1 else 2
-        reward = 1 - norm_dist
-        return reward
     
-    def _calculate_reward(self, action, joint_velocities):
+    def _calculate_reward(self, action):
         done = False
-        # Получаем текущую позицию и ориентацию
+        # Получаем текущую позицию и ориентацию, и скорость
         torso_pos, torso_orn = p.getBasePositionAndOrientation(self.robot)
+        torso_vel, _ = p.getBaseVelocity(self.robot)
         
         # 1. Награда за приближение к цели (основная компонента)
         target_pos = np.array(target["pos"][:2], dtype=np.float32)  # Координаты X,Y цели
@@ -168,7 +169,9 @@ class BipedWalkerEnv(gym.Env):
         
         # Нормированная награда за сокращение расстояния
         distance = (self.initial_dist - current_dist) / self.initial_dist
-        done = current_dist < 0.2
+        velocity = np.linalg.norm(torso_vel[:3])
+        # if self.step_count % 240 == 0: print(velocity)
+        done = current_dist < 0.2 and velocity < 0.9
         distance_reward = distance ** 3
         
         # 2. Штраф за энергию (резкие движения)
@@ -179,10 +182,10 @@ class BipedWalkerEnv(gym.Env):
         upright_penalty = -0.00001 * (1 - torso_orn[3])  # Используем w-компоненту кватерниона
         
         # 4. Поощрение за скорость к цели (опционально)
-        torso_vel, _ = p.getBaseVelocity(self.robot)
-        velocity_reward = 0.1 * np.dot(torso_vel[:2], displacement / (current_dist + 1e-5))
+        velocity_reward = 0.01 * np.dot(torso_vel[:2], displacement / (current_dist + 1e-5))
         flight_penalty = self.calc_flight_penalty()
         stability_reward = self.exp_reward(self.step_count, scale=0.001)
+        deviation_angle_penalty = -np.abs(action[-1]*2, dtype=np.float32)
         # Итоговая награда
         reward = np.sum([
             distance_reward, 
@@ -190,7 +193,8 @@ class BipedWalkerEnv(gym.Env):
             energy_penalty, 
             upright_penalty,
             flight_penalty,
-            stability_reward
+            stability_reward,
+            deviation_angle_penalty
         ], dtype=np.float32)
         return reward, done
 
