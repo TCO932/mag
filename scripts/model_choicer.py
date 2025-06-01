@@ -18,7 +18,7 @@ def select(models_dir, latest=False):
         key=lambda x: os.path.getmtime(x),
         reverse=True  # Новые файлы в начале
     )
-    selected_model = model_files_sorted.pop(-1)
+    selected_model = model_files_sorted[0]
 
     if not latest: 
         # Выбор модели через интерактивное меню
