@@ -16,8 +16,12 @@ class BipedWalkerEnv(gym.Env):
     def __init__(self, render_mode=None, rtk = 0):
         super().__init__()
         # Пространство действий (моменты для 6 суставов)
-        # -1.57, 1.57
-        self.action_space = gym.spaces.Box(low=-1., high=1., shape=(6,), dtype=np.float32)
+        self.action_space = gym.spaces.Box(
+            low=np.array([-1., -1., -1., -1., -1., -1.]), 
+            high=np.array([1., 0., 1., 1., 0., 1.]), 
+            shape=(6,), 
+            dtype=np.float32
+        )
         # Пространство состояний (углы, скорости, положение корпуса и т.д.)
         self.observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(19,), dtype=np.float32)
         
@@ -83,15 +87,10 @@ class BipedWalkerEnv(gym.Env):
                 replaceItemUniqueId=target["id"]  
             )
             
-
-        # Возвращаем начальное состояние
         return self._get_obs(), {}
 
     def step(self, action):
         time_before = time.time()
-        # Применяем действия (моменты суставов)
-        # print(action)
-        # action = [1.57, 1.57, 1.57, 1.57, 1.57, 1.57]
         for i in range(p.getNumJoints(self.robot)):
             p.setJointMotorControl2(
                 self.robot,
@@ -102,12 +101,8 @@ class BipedWalkerEnv(gym.Env):
 
         p.stepSimulation()
 
-        # Получаем новое состояние
         obs = self._get_obs()
 
-        # Считаем награду
-
-        # Проверяем терминальное состояние (падение)
         sim_drt = time.time() - time_before
 
         reward, target_reached = self._calculate_reward(action)
@@ -204,13 +199,6 @@ class BipedWalkerEnv(gym.Env):
         # Проверка падения
         torso_pos, _ = p.getBasePositionAndOrientation(self.robot)
         return torso_pos[2] < 0.5
-
-    # def render(self):
-    #     print('render')
-    #     if self.render_mode == "human":
-    #     #     p.setRealTimeSimulation(1)
-    #         time.sleep(1/10)  # Замедление для визуализации
-    #         print('human')
 
     def create_toggle_btn(self):
         self.toggle_btn = p.addUserDebugParameter("Toggle controls", 1, 0, 0)
@@ -334,52 +322,6 @@ class BipedWalkerEnv(gym.Env):
                 
 
             times =+ 1
-
-    def cam_init(self):
-        cam_dist_slider = p.addUserDebugParameter(
-            paramName="cameraDistance",
-            rangeMin=1,
-            rangeMax=15,
-            startValue=8
-        )
-        cam_yaw_slider = p.addUserDebugParameter(
-            paramName="cameraYaw",
-            rangeMin=-90,
-            rangeMax=90,
-            startValue=0
-        )
-        cam_pitch_slider = p.addUserDebugParameter(
-            paramName="cameraPitch",
-            rangeMin=-90,
-            rangeMax=90,
-            startValue=-30
-        )
-        trg_pos = [0, 3, 0]
-        trg_pos_names = ["_x", "_y", "_z"]
-        trg_pos_sliders = [
-            p.addUserDebugParameter(
-                paramName=trg_pos_names[i],
-                rangeMin=-5,
-                rangeMax=5,
-                startValue=trg_pos[i]
-            ) for i in range(len(trg_pos))
-        ]
-
-        def cam_upd():
-            cameraDistance = p.readUserDebugParameter(cam_dist_slider)
-            cameraYaw = p.readUserDebugParameter(cam_yaw_slider)
-            cameraPitch = p.readUserDebugParameter(cam_pitch_slider)
-            cameraTargetPosition = [
-                p.readUserDebugParameter(trg_pos_sliders[i]) for i in range(len(trg_pos_sliders))
-            ]
-            p.resetDebugVisualizerCamera(
-                cameraDistance=cameraDistance, 
-                cameraYaw=cameraYaw,
-                cameraPitch=cameraPitch, 
-                cameraTargetPosition=cameraTargetPosition
-            )
-
-        return cam_upd
 
     def render(self):
         if self.render_mode != "rgb_array":
