@@ -44,9 +44,7 @@ class BipedWalkerEnv(gym.Env):
             "render_modes": ["human", "rgb_array"],  # Explicitly list supported modes
             "render_fps": 30,  # Optional: framerate for rendering
         }
-
-        p.configureDebugVisualizer(p.COV_ENABLE_SHADOWS, 0)
-
+        
         if self.render_mode == "human":
             self.create_toggle_btn()
             self.create_joint_sliders()
@@ -334,79 +332,3 @@ class BipedWalkerEnv(gym.Env):
                 
 
             times =+ 1
-
-    def cam_init(self):
-        cam_dist_slider = p.addUserDebugParameter(
-            paramName="cameraDistance",
-            rangeMin=1,
-            rangeMax=15,
-            startValue=8
-        )
-        cam_yaw_slider = p.addUserDebugParameter(
-            paramName="cameraYaw",
-            rangeMin=-90,
-            rangeMax=90,
-            startValue=0
-        )
-        cam_pitch_slider = p.addUserDebugParameter(
-            paramName="cameraPitch",
-            rangeMin=-90,
-            rangeMax=90,
-            startValue=-30
-        )
-        trg_pos = [0, 3, 0]
-        trg_pos_names = ["_x", "_y", "_z"]
-        trg_pos_sliders = [
-            p.addUserDebugParameter(
-                paramName=trg_pos_names[i],
-                rangeMin=-5,
-                rangeMax=5,
-                startValue=trg_pos[i]
-            ) for i in range(len(trg_pos))
-        ]
-
-        def cam_upd():
-            cameraDistance = p.readUserDebugParameter(cam_dist_slider)
-            cameraYaw = p.readUserDebugParameter(cam_yaw_slider)
-            cameraPitch = p.readUserDebugParameter(cam_pitch_slider)
-            cameraTargetPosition = [
-                p.readUserDebugParameter(trg_pos_sliders[i]) for i in range(len(trg_pos_sliders))
-            ]
-            p.resetDebugVisualizerCamera(
-                cameraDistance=cameraDistance, 
-                cameraYaw=cameraYaw,
-                cameraPitch=cameraPitch, 
-                cameraTargetPosition=cameraTargetPosition
-            )
-
-        return cam_upd
-
-    def render(self):
-        if self.render_mode != "rgb_array":
-            return None
-        
-        width, height = 640, 480
-        # Настройки камеры
-        view_matrix = p.computeViewMatrix(
-            cameraEyePosition=[1, 1, 1],
-            cameraTargetPosition=[0, 0, 0],
-            cameraUpVector=[0, 0, 1]
-        )
-        proj_matrix = p.computeProjectionMatrixFOV(
-            fov=60, aspect=width/height,
-            nearVal=0.1, farVal=100.0
-        )
-        
-        # Получаем кадр
-        _, _, rgb, _, _ = p.getCameraImage(
-            width, height,
-            viewMatrix=view_matrix,
-            projectionMatrix=proj_matrix,
-            renderer=p.ER_BULLET_HARDWARE_OPENGL
-        )
-        
-        # Переводим из RGB (PyBullet) в BGR (OpenCV)
-        return rgb[:, :, :3]  # Убираем альфа-канал
-
-    def close(self):
-        p.disconnect()
