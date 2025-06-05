@@ -13,8 +13,9 @@ max_force = 100
 
 class BipedWalkerEnv(gym.Env):
 
-    def __init__(self, render_mode=None, rtk = 0):
+    def __init__(self, training_phase=0, render_mode=None, rtk = 0):
         super().__init__()
+        self.training_phase = training_phase
         # Пространство действий (моменты для 6 суставов)
         self.action_space = gym.spaces.Box(
             low=np.array([-1., -1., -1., -1., -1., -1.]), 
@@ -105,17 +106,10 @@ class BipedWalkerEnv(gym.Env):
 
         sim_drt = time.time() - time_before
 
-        reward, target_reached = self._calculate_reward(action)
+        reward = self._get_reward()
         
-        falled = self._check_fall()
-        reward -= 50 if falled else 0
-        reward += 80 if target_reached else 0
+        done = reward < -80
 
-        done = np.logical_or(
-            falled,
-            target_reached
-        )
-        
         if self.render_mode == "human":
             if hasattr(self, 'joint_sliders'):
                 self.update_joints_from_sliders()
@@ -130,14 +124,12 @@ class BipedWalkerEnv(gym.Env):
         return obs, reward, done, False, {"sim_drt": sim_drt}
 
     def _get_obs(self):
-        # Пример: углы, скорости, ориентация корпуса
         joint_states = p.getJointStates(self.robot, range(6))
 
         angles = [state[0] for state in joint_states]
         velocities = [state[1] for state in joint_states]
         torso_pos, torso_orn = p.getBasePositionAndOrientation(self.robot)
         deviation_angle = self.deviation_angle(torso_pos, torso_orn)
-        # return np.concatenate([angles, velocities, torso_pos[:2], torso_orn])
         obs = np.concatenate([
             angles, 
             velocities, 
@@ -147,6 +139,60 @@ class BipedWalkerEnv(gym.Env):
 
         ], dtype=np.float32)
         return obs
+
+    def _get_reward(self):
+        if self.training_phase == 0 or self.training_phase == 1:
+            fall_penalty, stability_reward, tilt_pen = self._reward_balance()
+            reward = np.sum([
+                1. * fall_penalty,
+                1. * stability_reward,
+                1. * tilt_pen
+            ], dtype=np.float32)
+            return reward
+        elif self.training_phase == 2:  # Ходьба
+            fall_penalty, stability_reward, tilt_pen = self._reward_balance()
+            velocity_reward, flight_penalty = self._reward_walk()
+            reward = np.sum([
+                .5 * fall_penalty,
+                .5 * stability_reward,
+                .5 * tilt_pen,
+                1. * velocity_reward,
+                1. * flight_penalty
+            ], dtype=np.float32)
+            return reward
+        else:  # Повороты
+            return self._reward_turn()
+
+    def _reward_balance(self):
+        # Награда за вертикальное положение
+        fall_penalty = -100 if self._check_fall() else 0
+
+        N = 1000  # Общее число шагов
+        total_reward = 100  # Желаемая сумма наград
+        k = 0.005  # Коэффициент затухания (можно менять)
+        t = self.step_count
+
+        # Вычисляем начальную награду r0
+        r0 = total_reward * (1 - np.exp(-k)) / (1 - np.exp(-k * N))
+        stability_reward = r0 * np.exp(-k * t)
+
+        # Штраф за наклон
+        tilt_pen = self.tilt_penalty(max_allowed_tilt=20)
+
+        return fall_penalty, stability_reward, tilt_pen
+
+    def _reward_walk(self):
+        velocity_reward = self.get_speed_projection([0, 1, 0]) # Скорость по Y
+        flight_penalty = self.calc_flight_penalty()
+        return velocity_reward, flight_penalty
+
+    def _reward_turn(self):
+
+        "доделать"
+
+        # Награда за поворот + движение
+        angle_error = abs(self.robot_yaw - self.target_angle)
+        return -angle_error + 0.1 * self.robot_velocity_x
     
     def _calculate_reward(self, action):
         done = False
@@ -199,6 +245,58 @@ class BipedWalkerEnv(gym.Env):
         # Проверка падения
         torso_pos, _ = p.getBasePositionAndOrientation(self.robot)
         return torso_pos[2] < 0.5
+
+    def tilt_penalty(self, max_allowed_tilt=15):
+        """
+        Возвращает штраф (отрицательное число) за наклон корпуса.
+        max_allowed_tilt - максимальный допустимый наклон в градусах.
+        """
+        pitch, roll = self.get_body_tilt_angles()
+        max_tilt = max(abs(pitch), abs(roll))
+        
+        if max_tilt <= max_allowed_tilt:
+            return 0  # Нет штрафа
+        else:
+            # Квадратичный штраф за превышение угла
+            penalty = -0.1 * (max_tilt - max_allowed_tilt)**2
+            return penalty
+
+    def get_body_tilt_angles(self):
+        """
+        Возвращает углы наклона корпуса (тангаж и крен) в градусах.
+        Тангаж (pitch) - наклон вперед/назад, крен (roll) - наклон вбок.
+        """
+        _, orientation = p.getBasePositionAndOrientation(self.robot)
+        quat = orientation
+        rotation_matrix = np.array(p.getMatrixFromQuaternion(quat)).reshape(3, 3)
+        
+        # Вычисляем тангаж (pitch) и крен (roll) в радианах
+        pitch = np.arctan2(-rotation_matrix[2, 0], np.sqrt(rotation_matrix[2, 1]**2 + rotation_matrix[2, 2]**2))
+        roll = np.arctan2(rotation_matrix[2, 1], rotation_matrix[2, 2])
+        
+        # Переводим в градусы
+        return np.degrees(pitch), np.degrees(roll)
+
+    def get_speed_projection(self, direction_vector):
+        """
+        Возвращает проекцию скорости робота на заданный вектор направления.
+        
+        Параметры:
+            direction_vector (np.array): Вектор направления [x, y, z] (любой длины).
+        
+        Возвращает:
+            float: Проекция скорости в м/с (скаляр).
+        """
+        # Получаем линейную скорость корпуса в глобальных координатах
+        linear_velocity, _ = p.getBaseVelocity(self.robot)
+        v = np.array(linear_velocity, dtype=np.float16)
+        
+        # Нормируем вектор направления
+        d = np.array(direction_vector, dtype=np.float16)
+        d_norm = d / np.linalg.norm(d) if np.linalg.norm(d) > 0 else np.zeros(3)
+        
+        # Вычисляем проекцию скорости (скалярное произведение)
+        return np.dot(v, d_norm, dtype=np.float16)
 
     def create_toggle_btn(self):
         self.toggle_btn = p.addUserDebugParameter("Toggle controls", 1, 0, 0)
@@ -322,6 +420,9 @@ class BipedWalkerEnv(gym.Env):
                 
 
             times =+ 1
+
+    def set_phase(self, phase):
+        self.phase = phase
 
     def render(self):
         if self.render_mode != "rgb_array":
