@@ -11,6 +11,7 @@ models_dir = os.path.join(script_dir, "models")  # RLEnv/BipedWalkerEnv/models
 # env = gym.make("BipedWalker-v0", render_mode="human")
 env = gym.make(env_name, render_mode="human")
 obs, _ = env.reset()
+prev_time = time.time()
 while (1):
     action = env.action_space.sample()
     observation, reward, terminated, truncated, info = env.step(action)
@@ -19,4 +20,9 @@ while (1):
         observation, info = env.reset()
         pass
 
-    # time.sleep(.01)
+    if env.render_mode == "human":
+        elapsed = time.time() - prev_time
+        time_to_wait = (1.0 / 240.0) - elapsed
+        if time_to_wait > 0:
+            time.sleep(time_to_wait)
+        prev_time = time.time()

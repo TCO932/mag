@@ -12,3 +12,9 @@ gym.register(
     entry_point="BipedWalkerEnv-v1:BipedWalkerEnv",
     max_episode_steps=1000,  
 )
+
+gym.register(  
+    id="BipedWalkerCustom-v2",  
+    entry_point="BipedWalkerEnv-v1:BipedWalkerEnv",
+    max_episode_steps=3000,  
+)

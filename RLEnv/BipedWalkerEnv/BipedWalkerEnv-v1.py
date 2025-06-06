@@ -6,7 +6,8 @@ import pybullet_data  # Модуль со встроенными моделям�
 import time
 
 target = {
-    "pos": np.array([0., 3., 0.])
+    "pos": np.array([0., 3., 0.]),
+    "id": None
 }
 max_force = 100
 
@@ -30,13 +31,13 @@ class BipedWalkerEnv(gym.Env):
             
         p.setGravity(0, 0, -9.81)
 
-        p.addUserDebugLine(
-            target["pos"], 
-            [target["pos"][0], target["pos"][1], 3],    # Конечная точка
-            lineColorRGB=[1, 0, 0],  # Цвет (R, G, B) от 0 до 1
-            lineWidth=2,             # Толщина линии
-            lifeTime=0  
-        )
+        # p.addUserDebugLine(
+        #     target["pos"], 
+        #     [target["pos"][0], target["pos"][1], 3],    # Конечная точка
+        #     lineColorRGB=[1, 0, 0],  # Цвет (R, G, B) от 0 до 1
+        #     lineWidth=2,             # Толщина линии
+        #     lifeTime=0  
+        # )
 
         script_dir = os.path.dirname(os.path.abspath(__file__))
         search_path = os.path.join(script_dir, "URDFs")  # RLEnv/BipedWalkerEnv/URDFs
@@ -66,12 +67,38 @@ class BipedWalkerEnv(gym.Env):
             p.resetJointState(self.robot, joint, 0)
 
         self.step_count = 0
+        XY_pos = np.random.randint(2, 4, size=2)
+        X_sign = np.random.choice([-1, 1], size=1)
+        XY_signs = np.append(X_sign, [1])
+        target["pos"] = np.append(XY_pos * XY_signs, [0])
+
+
+        if not target["id"]:
+            target["id"] = p.addUserDebugLine(
+                target["pos"], 
+                [target["pos"][0], target["pos"][1], 3],    # Конечная точка
+                lineColorRGB=[1, 0, 0],  # Цвет (R, G, B) от 0 до 1
+                lineWidth=2,             # Толщина линии
+            )
+        else:
+            p.addUserDebugLine(
+                target["pos"], 
+                [target["pos"][0], target["pos"][1], 3],    # Конечная точка
+                lineColorRGB=[1, 0, 0],  # Цвет (R, G, B) от 0 до 1
+                lineWidth=2,             # Толщина линии
+                replaceItemUniqueId=target["id"]  
+            )
 
         # Возвращаем начальное состояние
         return self._get_obs(), {}
 
     def step(self, action):
         time_before = time.time()
+
+        # В первые 1000 шагов добавляем случайные колебания
+        # if self.step_count < 1000:
+        #     action[:6] = 1 - (2 * np.sin(self.step_count / 100) + np.random.normal(0, 0.5, size=6))
+
         # Применяем действия (моменты суставов)
         # print(action)
         # action = [1.57, 1.57, 1.57, 1.57, 1.57, 1.57]
@@ -80,7 +107,7 @@ class BipedWalkerEnv(gym.Env):
                 self.robot,
                 i,
                 controlMode=p.TORQUE_CONTROL,
-                force=action[i] * 250
+                force=action[i] * 200
             )
 
         p.stepSimulation()
@@ -137,21 +164,57 @@ class BipedWalkerEnv(gym.Env):
         ], dtype=np.float32)
         return obs
 
-    def _calculate_reward2(self, action, joint_velocities):
-        # Пример: награда за скорость вперёд
-        # torso_vel = p.getBaseVelocity(self.robot)[0][0]  # Скорость по X
-        # energy = sum(abs(a * v) for a, v in zip(action, joint_velocities))
-        # reward = torso_vel - 0.01 * energy
-
-        torso_pos, _ = p.getBasePositionAndOrientation(self.robot)
-        dist = np.linalg.norm(target["pos"][:2])
-        current_dist = np.linalg.norm(torso_pos[:2] - target["pos"][:2])
-        rel_dist = current_dist/dist
-        norm_dist = current_dist/dist if rel_dist < 1 else 2
-        reward = 1 - norm_dist
-        return reward
-    
     def _calculate_reward(self, action, joint_velocities):
+        done = False
+        # Поощряем антифазные движения ног (left_hip и right_hip - индексы суставов)
+        left_hip_joint_idx, right_hip_joint_idx = 0, 3
+        left_hip_angle = p.getJointState(self.robot, left_hip_joint_idx)[0]
+        right_hip_angle = p.getJointState(self.robot, right_hip_joint_idx)[0]
+        gait_reward = np.sin(left_hip_angle - right_hip_angle)  # Осциллирующая награда
+
+        # Средняя скорость суставов ног
+        leg_velocity = np.mean([np.abs([state[1] for state in p.getJointStates(self.robot, range(6))])])
+        inactivity_penalty = -0.1 if leg_velocity < 0.1 else 0.0  # Штраф за "ленивые" ноги
+
+        # Бонус за попеременные касания (left_foot и right_foot - индексы ступней)
+        right_contact = len(p.getContactPoints(self.robot, self.robot, 2)) > 0
+        left_contact = len(p.getContactPoints(self.robot, self.robot, 5)) > 0
+        contact_reward = 0.3 * (left_contact != right_contact)  # Награда за шаг
+
+        torso_vel, _ = p.getBaseVelocity(self.robot)
+        torso_orn = p.getBasePositionAndOrientation(self.robot)[1]
+        rotation_matrix = np.array(p.getMatrixFromQuaternion(torso_orn)).reshape(3, 3)
+        forward_vector = rotation_matrix[:, 0]
+        forward_velocity = np.dot(torso_vel, forward_vector)
+
+        # Награда за приближение к цели (основная компонента)
+        torso_pos, torso_orn = p.getBasePositionAndOrientation(self.robot)
+        target_pos = np.array(target["pos"][:2], dtype=np.float32)  # Координаты X,Y цели
+        current_pos = np.array(torso_pos[:2], dtype=np.float32)
+        displacement = target_pos - current_pos
+        current_dist = np.linalg.norm(displacement)
+        # Если dist - начальное расстояние, вычисляем его один раз в начале эпизода
+        if not hasattr(self, 'initial_dist'):
+            self.initial_dist = current_dist
+        # Нормированная награда за сокращение расстояния
+        distance = (self.initial_dist - current_dist) / self.initial_dist
+        done = current_dist < 0.2
+        distance_reward = distance ** 3
+
+        # Начинаем с простой цели - просто двигать ногами
+        # if self.step_count < 5000:
+        #     reward = gait_reward - abs(forward_velocity)  # Игнорируем движение вперёд сначала
+
+        reward = np.sum([
+            1.0 * forward_velocity,  # Поощрение движения вперёд
+            2 * gait_reward,     # Ритмичность
+            contact_reward,        # Попеременные касания
+            # - 0.1 * energy_usage,    # Умеренный штраф за энергию
+            inactivity_penalty,    # Штраф за бездействие
+        ], dtype=np.float32)
+        return reward, done
+    
+    def _calculate_reward3(self, action, joint_velocities):
         done = False
         # Получаем текущую позицию и ориентацию
         torso_pos, torso_orn = p.getBasePositionAndOrientation(self.robot)
@@ -275,7 +338,7 @@ class BipedWalkerEnv(gym.Env):
     def exp_reward(self, value: np.float32, max_reward=10.0, scale=0.001):
         return np.min([max_reward, np.exp(scale * value) - 1])
     
-    def deviation_angle(self, torso_pos, torso_orn, dbg=False):
+    def deviation_angle(self, torso_pos, torso_orn, dbg=True):
         # Вычисляем угол отклонения
         rotation_matrix = np.array(p.getMatrixFromQuaternion(torso_orn), dtype=np.float32).reshape(3, 3)
         forward_vector = rotation_matrix[:, 1]

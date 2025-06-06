@@ -7,7 +7,7 @@ import RegEnvs
 from gymnasium.wrappers import RecordEpisodeStatistics, RecordVideo
 
 
-env_name = "BipedWalkerCustom-v1"
+env_name = "BipedWalkerCustom-v2"
 model_name = "BipedWalkerCustom-v4"
 alg = "PPO"
 total_timesteps = 5_000_000

@@ -104,7 +104,7 @@
 
   <link name="right_foot">
     <contact>
-      <lateral_friction value="1.5"/>
+      <lateral_friction value="2.0"/>
     </contact>
     <inertial>
       <origin xyz="0 0.05 -0.05" rpy="0 0 0"/>
@@ -208,7 +208,7 @@
 
   <link name="left_foot">
     <contact>
-      <lateral_friction value="1.5"/>
+      <lateral_friction value="2.0"/>
     </contact>
     <inertial>
       <origin xyz="0 0.05 -0.05" rpy="0 0 0"/>
