@@ -1,6 +1,6 @@
 import time
 import gymnasium as gym
-from stable_baselines3 import PPO
+from stable_baselines3 import PPO, SAC
 import os
 from scripts.model_choicer import select
 import RegEnvs
@@ -10,7 +10,8 @@ import RegEnvs
 env_name = "BipedWalkerCustom-v1"
 
 script_dir = os.path.dirname(os.path.abspath(__file__))  # RLEnv/BipedWalkerEnv
-models_dir = os.path.join(script_dir, "models", "PPO")  # RLEnv/BipedWalkerEnv/models
+# models_dir = os.path.join(script_dir, "models", "SAC")  # RLEnv/BipedWalkerEnv/models
+models_dir = os.path.join(script_dir, "models", "Curriculum", "SAC")  # RLEnv/BipedWalkerEnv/models
 os.makedirs(models_dir, exist_ok=True)
 
 
@@ -18,10 +19,10 @@ max_envs = os.cpu_count()
 n_envs = max_envs
 print(f"n_envs: {n_envs}")
 
-env = gym.make(env_name, render_mode="human")
+model_path = select(models_dir=models_dir, latest=False)
 
-model_path = select(models_dir=models_dir, latest=True)
-model = PPO.load(model_path, env=env)       
+env = gym.make(env_name, render_mode="human")
+model = SAC.load(model_path, env=env)       
 
 obs, _ = env.reset()
 action, _ = model.predict(obs)

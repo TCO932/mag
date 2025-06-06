@@ -6,7 +6,7 @@ import pybullet_data  # Модуль со встроенными моделям�
 import time
 
 target = {
-    "pos": np.array([-1., 3., 0.]),
+    "pos": np.array([0., 3., 0.]),
     "id": None
 }
 max_force = 100
@@ -66,10 +66,10 @@ class BipedWalkerEnv(gym.Env):
             p.resetJointState(self.robot, joint, 0)
 
         self.step_count = 0
-        XY_pos = np.random.randint(2, 5, size=2)
-        X_sign = np.random.choice([-1, 1], size=1)
-        XY_signs = np.append(X_sign, [1])
-        target["pos"] = np.append(XY_pos * XY_signs, [0])
+        # XY_pos = np.random.randint(2, 5, size=2)
+        # X_sign = np.random.choice([-1, 1], size=1)
+        # XY_signs = np.append(X_sign, [1])
+        # target["pos"] = np.append(XY_pos * XY_signs, [0])
 
 
         if not target["id"]:
@@ -146,7 +146,7 @@ class BipedWalkerEnv(gym.Env):
             reward = np.sum([
                 1. * fall_penalty,
                 1. * stability_reward,
-                1. * tilt_pen
+                .0 * tilt_pen
             ], dtype=np.float32)
             return reward
         elif self.training_phase == 2:  # Ходьба
@@ -168,8 +168,8 @@ class BipedWalkerEnv(gym.Env):
         fall_penalty = -100 if self._check_fall() else 0
 
         N = 1000  # Общее число шагов
-        total_reward = 100  # Желаемая сумма наград
-        k = 0.005  # Коэффициент затухания (можно менять)
+        total_reward = 1000  # Желаемая сумма наград
+        k = 0.001  # Коэффициент затухания (можно менять)
         t = self.step_count
 
         # Вычисляем начальную награду r0
@@ -258,7 +258,7 @@ class BipedWalkerEnv(gym.Env):
             return 0  # Нет штрафа
         else:
             # Квадратичный штраф за превышение угла
-            penalty = -0.1 * (max_tilt - max_allowed_tilt)**2
+            penalty = -0.01 * (max_tilt - max_allowed_tilt)**2
             return penalty
 
     def get_body_tilt_angles(self):

@@ -1,6 +1,8 @@
 import time
 import gymnasium as gym
 import os
+
+import numpy as np
 import RegEnvs
 import pybullet as p
 
@@ -63,7 +65,10 @@ cam_upd = cam_init()
 while (1):
     cam_upd()
     action = env.action_space.sample()
+    action = np.zeros(6, dtype=np.float32)
+    # print(action)
     observation, reward, terminated, truncated, info = env.step(action)
+    # print(reward)
 
     if terminated or truncated:
         observation, info = env.reset()

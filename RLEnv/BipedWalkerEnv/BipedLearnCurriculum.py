@@ -1,9 +1,13 @@
 import os
 import gymnasium as gym
 
-from stable_baselines3 import SAC
+import inquirer
+from stable_baselines3 import PPO, SAC, TD3
 from stable_baselines3.common.callbacks import EvalCallback, StopTrainingOnRewardThreshold
 from stable_baselines3.common.callbacks import BaseCallback
+
+from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.vec_env import VecNormalize
 
 import RegEnvs
 import BipedCurriculumCallback as cb 
@@ -11,17 +15,29 @@ import BipedCurriculumCallback as cb
 
 env_name = "BipedWalkerCustom-v1"
 model_name = "BipedWalkerCustom-v4"
-alg = "SAC"
+alg_name = "SAC"
+algs = {"PPO": PPO, "SAC": SAC, "TD3": TD3}
+alg = algs[alg_name]
+
 total_timesteps = 2_000_000
 n_envs = 4
 
+if __name__ == "__main__":
+    algs_names = list(algs.keys())
+    choice = inquirer.prompt([
+        inquirer.List("algorithm", message="Select algorithm", choices=algs_names, default=algs_names[1])
+    ])
+    alg_name = choice["algorithm"]
+    alg = algs[alg_name]
+    print(f"Using {alg_name}...")
+
 script_dir = os.path.dirname(os.path.abspath(__file__))  # RLEnv/BipedWalkerEnv
-models_dir = os.path.join(script_dir, "models", "Curriculum", alg)  # RLEnv/BipedWalkerEnv/models/PPO
+models_dir = os.path.join(script_dir, "models", "Curriculum", alg_name)  # RLEnv/BipedWalkerEnv/models/PPO
 os.makedirs(models_dir, exist_ok=True)
-tb_logs_path = os.path.join(script_dir, "logs", "Curriculum", model_name, alg)
+tb_logs_path = os.path.join(script_dir, "logs", "Curriculum", model_name, alg_name)
 
 # Separate evaluation env
-eval_env = gym.make(env_name)
+# eval_env = gym.make(env_name)
 # eval_env.env_method("set_phase", 0)
 
 # Stop training when the model reaches the reward threshold
@@ -63,53 +79,43 @@ eval_env = gym.make(env_name)
 
 # env = make_vec_env("BipedalEnv-v0", n_envs=4)
 # model = PPO("MlpPolicy", env, verbose=1)
-env = gym.make(env_name)
-model = SAC(
-    "MlpPolicy",
-    eval_env,
-    verbose=1,
-    # n_steps=2048,           # Увеличить для более стабильных updates
-    # batch_size=64,          # Можно попробовать увеличить до 128-256
-    # learning_rate=3e-4,   # Стандартное значение для PPO
-    # ent_coef=0.05,           # Увеличить для большего исследования
-    # gamma=0.99,
-    # gae_lambda=0.95,
-    # max_grad_norm=0.5,
-    # clip_range=0.1,         # Уменьшить для более консервативных обновлений
-    # n_epochs=10,
-    tensorboard_log=tb_logs_path,
+
+env = make_vec_env(
+    env_name,
+    n_envs=n_envs,
 )
-callback = cb.CurriculumCallback(env, reward_threshold=500)
-model.learn(
-    total_timesteps=1_000_000, 
-    progress_bar=True,
-    callback=callback
-)
+env.render_mode = "human"
+env = VecNormalize(env, norm_obs=True, norm_reward=True) # Нормализуем среду
+# env = gym.make(env_name, )
+try:
+    model = alg.load(models_dir+"/"+model_name, env=env, verbose=1)
+    print("Модель загружена!")
+except (ValueError, FileNotFoundError):
+    print("Создаём новую модель...")
+    model = alg(
+        "MlpPolicy",
+        env,
+        verbose=1,
+        # n_steps=2048,           # Увеличить для более стабильных updates
+        # batch_size=64,          # Можно попробовать увеличить до 128-256
+        # learning_rate=3e-4,   # Стандартное значение для PPO
+        # ent_coef=0.05,           # Увеличить для большего исследования
+        # gamma=0.99,
+        # gae_lambda=0.95,
+        # max_grad_norm=0.5,
+        # clip_range=0.1,         # Уменьшить для более консервативных обновлений
+        # n_epochs=10,
+        tensorboard_log=tb_logs_path,
+    )
 
+try:
+    callback = cb.CurriculumCallback(env, reward_threshold=500)
+    model.learn(
+        total_timesteps=total_timesteps, 
+        progress_bar=True,
+        callback=callback
+    )
+except KeyboardInterrupt:
+    print("Обучение прервано пользователем!")
 
-# class CurriculumCallback(BaseCallback):
-#     def __init__(self, env, reward_threshold=500, verbose=0):
-#         super().__init__(verbose)
-#         self.env = env
-#         self.reward_threshold = reward_threshold
-#         self.phase = 0  # 0=balance, 1=walk, 2=turn
-
-#     def _on_step(self) -> bool:
-#         # Проверяем среднюю награду каждые 10 шагов
-#         if self.n_calls % 10 == 0:
-#             mean_reward = np.mean(self.model.ep_info_buffer["r"][-100:])
-#             if mean_reward >= self.reward_threshold and self.phase == 0:
-#                 self.phase = 1
-#                 self.env.env_method("set_phase", 1)  # Переключаем среду на режим ходьбы
-#                 print("Переход к этапу ходьбы!")
-#             elif mean_reward >= 800 and self.phase == 1:
-#                 self.phase = 2
-#                 self.env.env_method("set_phase", 2)  # Переключаем на повороты
-#                 print("Переход к этапу поворотов!")
-#         return True
-
-# # Использование:
-# env = make_vec_env("BipedalEnv-v0", n_envs=4)
-# model = PPO("MlpPolicy", env, verbose=1)
-# callback = CurriculumCallback(env, reward_threshold=500)
-# model.learn(total_timesteps=1_000_000, callback=callback)
+model.save(models_dir+"/"+model_name)
