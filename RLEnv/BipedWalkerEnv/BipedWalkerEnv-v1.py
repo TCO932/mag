@@ -5,203 +5,321 @@ import numpy as np
 import pybullet_data  # Модуль со встроенными моделями
 import time
 
-target = {
-    "pos": np.array([0., 3., 0.]),
-    "id": None
-}
+
+class Target():
+    def __init__(self, pos=np.array([0., 3., 0.])):
+        self.pos = pos
+        self.id = p.addUserDebugLine(
+            self.pos, 
+            [self.pos[0], self.pos[1], 3],      # Конечная точка
+            lineColorRGB=[1, 0, 0],             # Цвет (R, G, B) от 0 до 1
+            lineWidth=2,                        # Толщина линии
+        )
+
+    def randomize_target_pos(self, max_dist=5, angle1=-np.pi,angle2=np.pi):
+        dist = np.random.randint(2, max_dist)
+        angle = np.random.uniform(angle1, angle2)
+        self.pos = np.array([dist * np.cos(angle), dist * np.sin(angle), 0])
+
+        p.addUserDebugLine(
+            self.pos, 
+            [self.pos[0], self.pos[1], 3],      # Конечная точка
+            lineColorRGB=[1, 0, 0],             # Цвет (R, G, B) от 0 до 1
+            lineWidth=2,                        # Толщина линии
+            replaceItemUniqueId=self.id  
+        )
+
 max_force = 100
 
 class BipedWalkerEnv(gym.Env):
 
-    def __init__(self, training_phase=0, render_mode=None, rtk = 0):
+    def __init__(self, render_mode=None, rtk=0, curriculum_stage=1):
         super().__init__()
-        self.training_phase = training_phase
-        # Пространство действий (моменты для 6 суставов)
-        self.action_space = gym.spaces.Box(
-            low=np.array([-1., -1., -1., -1., -1., -1.]), 
-            high=np.array([1., 0., 1., 1., 0., 1.]), 
-            shape=(6,), 
-            dtype=np.float32
-        )
-        # Пространство состояний (углы, скорости, положение корпуса и т.д.)
-        self.observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(19,), dtype=np.float32)
-        
-        self.render_mode = render_mode
-        self.rtk = rtk
-        self.step_count = 0
-
-        # Загрузка модели
-        self.physics_client = p.connect(
-            p.DIRECT if self.render_mode != "human" else p.GUI)
-            
-        p.setGravity(0, 0, -9.81)
-
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        search_path = os.path.join(script_dir, "URDFs")  # RLEnv/BipedWalkerEnv/URDFs
-        p.setAdditionalSearchPath(search_path)
-
-        # Загружаем встроенного гуманоида
-        self.robot = p.loadURDF("biped.urdf")
-        # self.robot = p.loadURDF("biped_pybullet.urdf")
-        self.plane = p.loadURDF("plane.urdf")
-
         self.metadata = {
             "render_modes": ["human", "rgb_array"],  # Explicitly list supported modes
             "render_fps": 30,  # Optional: framerate for rendering
         }
-
+        self.render_mode = render_mode
+        # Загрузка модели
+        self.physics_client = p.connect(
+            p.DIRECT if self.render_mode != "human" else p.GUI)
         p.configureDebugVisualizer(p.COV_ENABLE_SHADOWS, 0)
 
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        search_path = os.path.join(script_dir, "URDFs")  # RLEnv/BipedWalkerEnv/URDFs
+        p.setAdditionalSearchPath(search_path)
+        self.robot_id = p.loadURDF("biped.urdf")
+
+        # self.robot = p.loadURDF("biped_pybullet.urdf")
+        self.plane_id = p.loadURDF("plane.urdf")
         if self.render_mode == "human":
             self.create_toggle_btn()
             self.create_joint_sliders()
-
         self.debug()
+
+        p.setGravity(0, 0, -9.81)
+
+        self.rtk = rtk
+        self.step_count = 0
+        self.motor_joints_indices = [0, 1, 2, 3, 4, 5]
+        self.curriculum_stage = curriculum_stage # 1: стоять, 2: баланс, 3: идти, 4: к цели
+        self.target = Target()
+        self.prev_dist_to_target = 0.0 
+        self.robot_height = 1.6
+
+        # Пространство действий (моменты для 6 суставов)
+        self.action_space = gym.spaces.Box(
+            low=np.array([-1., -1., -1., -1., -1., -1.], dtype=np.float32), 
+            high=np.array([1., 0., 1., 1., 0., 1.], dtype=np.float32), 
+            dtype=np.float32
+        )
+        obs_dim = len(self.motor_joints_indices) * 2 + 4 # 6 pos + 6 vel + 4 quat
+        if self.curriculum_stage == 4:
+            obs_dim += 2 # Добавляем относительные угол отклонения от цели (-π, +π) и расстояние
+        # Пространство состояний (углы, скорости, положение корпуса и т.д.)
+        self.observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)
+
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        # Сброс робота в начальное положение
-        p.resetBasePositionAndOrientation(self.robot, [0, 0, 1.6], [0, 0, 0, 1])
-        for joint in range(p.getNumJoints(self.robot)):
-            p.resetJointState(self.robot, joint, 0)
 
         self.step_count = 0
-        # XY_pos = np.random.randint(2, 5, size=2)
-        # X_sign = np.random.choice([-1, 1], size=1)
-        # XY_signs = np.append(X_sign, [1])
-        # target["pos"] = np.append(XY_pos * XY_signs, [0])
+        # --- Начальная поза в зависимости от этапа ---
+        start_pos = [0, 0, self.robot_height+0.01]
+        start_orn = p.getQuaternionFromEuler([0, 0, 0])
 
 
-        if not target["id"]:
-            target["id"] = p.addUserDebugLine(
-                target["pos"], 
-                [target["pos"][0], target["pos"][1], 3],    # Конечная точка
-                lineColorRGB=[1, 0, 0],  # Цвет (R, G, B) от 0 до 1
-                lineWidth=2,             # Толщина линии
-            )
-        else:
-            p.addUserDebugLine(
-                target["pos"], 
-                [target["pos"][0], target["pos"][1], 3],    # Конечная точка
-                lineColorRGB=[1, 0, 0],  # Цвет (R, G, B) от 0 до 1
-                lineWidth=2,             # Толщина линии
-                replaceItemUniqueId=target["id"]  
-            )
+        if self.curriculum_stage == 2: # Этап 2: Баланс с возмущением
+             # Добавляем небольшое случайное отклонение
+            roll = np.random.uniform(-0.2, 0.2)
+            pitch = np.random.uniform(-0.2, 0.2)
+            start_orn = p.getQuaternionFromEuler([roll, pitch, 0])
+
+        # Сброс робота в начальное положение
+        p.resetBasePositionAndOrientation(self.robot_id, start_pos, start_orn)
+        for joint in range(p.getNumJoints(self.robot_id)):
+            p.resetJointState(self.robot_id, joint, 0)
+
+        # --- Цель для этапа 4 ---
+        if self.curriculum_stage == 4:
+            self.target.randomize_target_pos()
+
+            # Получаем начальную позицию робота
+            torso_pos, _ = p.getBasePositionAndOrientation(self.robot_id)
+            # Вычисляем начальное расстояние и сохраняем его как "предыдущее"
+            self.prev_dist_to_target = np.linalg.norm(self.target.pos[:2] - np.array(torso_pos[:2]))
             
         return self._get_obs(), {}
 
+
     def step(self, action):
         time_before = time.time()
-        for i in range(p.getNumJoints(self.robot)):
-            p.setJointMotorControl2(
-                self.robot,
-                i,
-                controlMode=p.TORQUE_CONTROL,
-                force=action[i] * 250
-            )
-
-        p.stepSimulation()
-
-        obs = self._get_obs()
-
-        sim_drt = time.time() - time_before
-
-        reward = self._get_reward()
-        
-        done = reward < -80
+        # for i in range(p.getNumJoints(self.robot)):
+        #     p.setJointMotorControl2(
+        #         self.robot,
+        #         i,
+        #         controlMode=p.TORQUE_CONTROL,
+        #         force=action[i] * 250
+        #     )
+        p.setJointMotorControlArray(
+            bodyUniqueId=self.robot_id,
+            jointIndices=self.motor_joints_indices,
+            controlMode=p.POSITION_CONTROL,
+            targetPositions=action * np.pi / 2, # Масштабируем действие
+            forces=[150] * len(self.motor_joints_indices) # Максимальное усилие
+        )
 
         if self.render_mode == "human":
             if hasattr(self, 'joint_sliders'):
                 self.update_joints_from_sliders()
 
-            if self.rtk > 0:
-                time_to_wait = (self.rtk / 240.0) - sim_drt
-                if time_to_wait > 0:
-                    time.sleep(time_to_wait)
+        p.stepSimulation()
+
+        obs = self._get_obs()
+
+        reward = self._get_reward()
+        falled = self._check_fall()
+        reward += -50 if falled else 0
+        done = falled
 
         self.step_count += 1
+        sim_drt = time.time() - time_before
+        truncated = False # Здесь можно добавить условие по времени
+        info = {
+            "step_count": self.step_count,
+            "sim_drt": sim_drt
+        }
 
-        return obs, reward, done, False, {"sim_drt": sim_drt}
+        
+        if self.render_mode == "human" and self.rtk > 0:
+            time_to_wait = (self.rtk / 240.0) - sim_drt
+            if time_to_wait > 0:
+                time.sleep(time_to_wait)
+
+        return obs, reward, done, truncated, info
 
     def _get_obs(self):
-        joint_states = p.getJointStates(self.robot, range(6))
+        joint_states = p.getJointStates(self.robot_id, range(6))
 
         angles = [state[0] for state in joint_states]
         velocities = [state[1] for state in joint_states]
-        torso_pos, torso_orn = p.getBasePositionAndOrientation(self.robot)
-        deviation_angle = self.deviation_angle(torso_pos, torso_orn)
-        obs = np.concatenate([
-            angles, 
-            velocities, 
-            torso_pos[:2], 
-            torso_orn, 
-            [deviation_angle],
+        torso_pos, torso_orn = p.getBasePositionAndOrientation(self.robot_id)
+        r, deviation_angle = self.robot_polar_target_pos(torso_pos, torso_orn)
 
+        obs = np.concatenate([
+            angles,             # x6
+            velocities,         # x6
+            torso_orn,          # x4
         ], dtype=np.float32)
+
+        # Для этапа 4 добавляем информацию о цели
+        if self.curriculum_stage == 4:
+            obs = np.concatenate([
+                obs,
+                [r, deviation_angle],  # x2
+            ], dtype=np.float32)
+
         return obs
 
     def _get_reward(self):
-        if self.training_phase == 0 or self.training_phase == 1:
-            fall_penalty, stability_reward, tilt_pen = self._reward_balance()
-            reward = np.sum([
-                1. * fall_penalty,
-                1. * stability_reward,
-                .0 * tilt_pen
-            ], dtype=np.float32)
+        if self.curriculum_stage  == 1 or self.curriculum_stage  == 2:
+            reward = self._calculate_standing_reward()
             return reward
-        elif self.training_phase == 2:  # Ходьба
-            fall_penalty, stability_reward, tilt_pen = self._reward_balance()
-            velocity_reward, flight_penalty = self._reward_walk()
-            reward = np.sum([
-                .5 * fall_penalty,
-                .5 * stability_reward,
-                .5 * tilt_pen,
-                1. * velocity_reward,
-                1. * flight_penalty
-            ], dtype=np.float32)
+        elif self.curriculum_stage  == 3:  # Ходьба
+            reward = self._calculate_walking_reward()
             return reward
-        else:  # Повороты
-            return self._reward_turn()
+        elif self.curriculum_stage  == 4:  # Повороты
+            reward = self._calculate_target_reward()
+            return reward
+        
+    def _calculate_standing_reward(self):
+        # Этап 1 и 2: Стоять и балансировать
+        torso_pos, torso_orn = p.getBasePositionAndOrientation(self.robot_id)
+        
+        # 1. Бонус за выживание (быть "живым")
+        alive_bonus = 1.0
+        
+        # 2. Бонус за вертикальное положение
+        # Вектор "вверх" для торса. В идеале [0,0,1]
+        rot_matrix = p.getMatrixFromQuaternion(torso_orn)
+        up_vector = np.array(rot_matrix[6:]) # Третий столбец матрицы вращения
+        upright_reward = up_vector[2] # Чем ближе Z к 1, тем лучше
+        
+        # 3. Штраф за движение (мы хотим стоять на месте)
+        torso_vel, torso_ang_vel = p.getBaseVelocity(self.robot_id)
+        velocity_penalty = -(np.linalg.norm(torso_vel) + np.linalg.norm(torso_ang_vel))
+        
+        # 4. Штраф за энергопотребление/усилие
+        joint_states = p.getJointStates(self.robot_id, self.motor_joints_indices)
+        joint_torques = [state[3] for state in joint_states]
+        effort_penalty = -np.linalg.norm(joint_torques)
 
-    def _reward_balance(self):
-        # Награда за вертикальное положение
-        fall_penalty = -100 if self._check_fall() else 0
+        # --- НОВЫЙ КОМПОНЕНТ: Награда за высоту ---
+        target_height = self.robot_height  # <<< ЗАДАЙТЕ ЦЕЛЕВУЮ ВЫСОТУ ДЛЯ ВАШЕГО РОБОТА
+        current_height = torso_pos[2]
+        
+        # Мы хотим, чтобы отклонение от target_height было минимальным.
+        # Используем экспоненту, чтобы штраф был маленьким около цели и быстро рос при удалении.
+        # Коэффициент k определяет "строгость" штрафа.
+        height_diff_penalty = -(target_height - current_height)**2
+        # Эта функция дает 1.0, когда current_height == target_height, и быстро падает до 0.
 
-        N = 1000  # Общее число шагов
-        total_reward = 1000  # Желаемая сумма наград
-        k = 0.001  # Коэффициент затухания (можно менять)
-        t = self.step_count
+        return np.sum([
+            3.0     * alive_bonus,
+            1.0     * upright_reward,
+            0.3     * velocity_penalty,
+            0.006   * effort_penalty,
+            2.0     * height_diff_penalty
+        ], dtype=np.float32)
+    
+    def _calculate_walking_reward(self):
+        # Этап 3: Идти прямо
+        
+        # Награда за стояние - хорошая основа
+        base_reward = self._calculate_standing_reward()
+        
+        # 1. Главный бонус - за скорость вперед (по оси Y)
+        torso_vel, _ = p.getBaseVelocity(self.robot_id)
+        forward_velocity = torso_vel[1]
+        
+        # 2. Штраф за отклонение от прямой (движение по оси X)
+        sideways_penalty = - abs(torso_vel[0])
+        
+        return np.sum([
+            1   * base_reward,
+            2.0 * forward_velocity,
+            1.0 * sideways_penalty
+        ], dtype=np.float32)
 
-        # Вычисляем начальную награду r0
-        r0 = total_reward * (1 - np.exp(-k)) / (1 - np.exp(-k * N))
-        stability_reward = r0 * np.exp(-k * t)
+    def _calculate_target_reward(self):
+        torso_pos, torso_orn = p.getBasePositionAndOrientation(self.robot_id)
+        # Этап 4: Идти к цели
+        
+        # Награда за стояние все еще полезна
+        base_reward = self._calculate_standing_reward()
+        
+        # 1. Вычисляем ТЕКУЩЕЕ расстояние до цели
+        current_dist_to_target = np.linalg.norm(self.target.pos[:2] - np.array(torso_pos[:2]))
+        
+        # 2. Вычисляем награду за прогресс ("Горячо-Холодно")
+        # Мы умножаем на коэффициент (например, 1000), чтобы сделать этот сигнал значимым
+        progress_reward = (self.prev_dist_to_target - current_dist_to_target) * 1000 
+        
+        # 3. КРИТИЧЕСКИ ВАЖНО: Обновляем "предыдущее" расстояние для СЛЕДУЮЩЕГО шага
+        self.prev_dist_to_target = current_dist_to_target
+        
+        # 2. Большой бонус за достижение цели
+        reach_bonus = 0
+        if current_dist_to_target < 0.5: # Порог достижения цели
+            print("Цель достигнута!")
+            # Можно сделать terminated = True здесь, но это сложнее
+            # Проще дать большой бонус и сбросить цель в reset
+            reach_bonus = 50
+            
+        return np.sum([
+            1   * base_reward,
+            3.0 * progress_reward,
+            1.0 * reach_bonus
+        ], dtype=np.float32)
+
+    def _reward_balance_OUTDATED(self):
+        # N = 1000  # Общее число шагов
+        # total_reward = 1000  # Желаемая сумма наград
+        # k = 0.001  # Коэффициент затухания (можно менять)
+        # t = self.step_count
+
+        # # Вычисляем начальную награду r0
+        # r0 = total_reward * (1 - np.exp(-k)) / (1 - np.exp(-k * N))
+        # stability_reward = r0 * np.exp(-k * t)
+        stability_reward = .1
 
         # Штраф за наклон
         tilt_pen = self.tilt_penalty(max_allowed_tilt=20)
 
-        return fall_penalty, stability_reward, tilt_pen
+        return stability_reward, tilt_pen
 
-    def _reward_walk(self):
+    def _reward_walk_OUTDATED(self):
         velocity_reward = self.get_speed_projection([0, 1, 0]) # Скорость по Y
         flight_penalty = self.calc_flight_penalty()
         return velocity_reward, flight_penalty
 
-    def _reward_turn(self):
+    def _reward_turn_OUTDATED(self):
 
         "доделать"
 
         # Награда за поворот + движение
         angle_error = abs(self.robot_yaw - self.target_angle)
+        return -1000
         return -angle_error + 0.1 * self.robot_velocity_x
     
-    def _calculate_reward(self, action):
+    def _calculate_reward_OUTDATED(self, action):
         done = False
         # Получаем текущую позицию и ориентацию, и скорость
-        torso_pos, torso_orn = p.getBasePositionAndOrientation(self.robot)
-        torso_vel, _ = p.getBaseVelocity(self.robot)
+        torso_pos, torso_orn = p.getBasePositionAndOrientation(self.robot_id)
+        torso_vel, _ = p.getBaseVelocity(self.robot_id)
         
         # 1. Награда за приближение к цели (основная компонента)
-        target_pos = np.array(target["pos"][:2], dtype=np.float32)  # Координаты X,Y цели
+        target_pos = np.array(self.target.pos[:2], dtype=np.float32)  # Координаты X,Y цели
         current_pos = np.array(torso_pos[:2], dtype=np.float32)
         displacement = target_pos - current_pos
         current_dist = np.linalg.norm(displacement)
@@ -243,10 +361,10 @@ class BipedWalkerEnv(gym.Env):
 
     def _check_fall(self):
         # Проверка падения
-        torso_pos, _ = p.getBasePositionAndOrientation(self.robot)
+        torso_pos, _ = p.getBasePositionAndOrientation(self.robot_id)
         return torso_pos[2] < 0.5
 
-    def tilt_penalty(self, max_allowed_tilt=15):
+    def tilt_penalty_OUTDATED(self, max_allowed_tilt=15):
         """
         Возвращает штраф (отрицательное число) за наклон корпуса.
         max_allowed_tilt - максимальный допустимый наклон в градусах.
@@ -261,12 +379,12 @@ class BipedWalkerEnv(gym.Env):
             penalty = -0.01 * (max_tilt - max_allowed_tilt)**2
             return penalty
 
-    def get_body_tilt_angles(self):
+    def get_body_tilt_angles_OUTDATED(self):
         """
         Возвращает углы наклона корпуса (тангаж и крен) в градусах.
         Тангаж (pitch) - наклон вперед/назад, крен (roll) - наклон вбок.
         """
-        _, orientation = p.getBasePositionAndOrientation(self.robot)
+        _, orientation = p.getBasePositionAndOrientation(self.robot_id)
         quat = orientation
         rotation_matrix = np.array(p.getMatrixFromQuaternion(quat)).reshape(3, 3)
         
@@ -288,7 +406,7 @@ class BipedWalkerEnv(gym.Env):
             float: Проекция скорости в м/с (скаляр).
         """
         # Получаем линейную скорость корпуса в глобальных координатах
-        linear_velocity, _ = p.getBaseVelocity(self.robot)
+        linear_velocity, _ = p.getBaseVelocity(self.robot_id)
         v = np.array(linear_velocity, dtype=np.float16)
         
         # Нормируем вектор направления
@@ -303,10 +421,10 @@ class BipedWalkerEnv(gym.Env):
 
     def create_joint_sliders(self):
         self.joint_sliders = {}
-        num_joints = p.getNumJoints(self.robot)
+        num_joints = p.getNumJoints(self.robot_id)
         
         for joint_idx in range(num_joints):
-            joint_info = p.getJointInfo(self.robot, joint_idx)
+            joint_info = p.getJointInfo(self.robot_id, joint_idx)
             joint_name = joint_info[1].decode('utf-8')
             
             # Получаем ограничения сустава
@@ -329,7 +447,7 @@ class BipedWalkerEnv(gym.Env):
             for joint_idx, slider_id in self.joint_sliders.items():
                 slider_value = p.readUserDebugParameter(slider_id)
                 p.setJointMotorControl2(
-                    bodyUniqueId=self.robot,
+                    bodyUniqueId=self.robot_id,
                     jointIndex=joint_idx,
                     controlMode=p.POSITION_CONTROL,
                     targetPosition=slider_value,
@@ -346,9 +464,9 @@ class BipedWalkerEnv(gym.Env):
         # Для каждой ступни (пример для 4-ногого робота)
         for foot_link_id in [2, 5]:  # ID link'ов ступней (уточните для вашей модели)
             contact_info = p.getContactPoints(
-                bodyA=self.robot,
+                bodyA=self.robot_id,
                 linkIndexA=foot_link_id,
-                bodyB=self.plane  # ID плоскости (обычно 0)
+                bodyB=self.plane_id  # ID плоскости (обычно 0)
             )
             if (len(contact_info)):
                 foots_on_ground += 1 
@@ -356,7 +474,7 @@ class BipedWalkerEnv(gym.Env):
         is_in_air = foots_on_ground == 0
         
         # Штрафуем только если робот поднялся слишком высоко
-        torso_pos, _ = p.getBasePositionAndOrientation(self.robot)
+        torso_pos, _ = p.getBasePositionAndOrientation(self.robot_id)
         if is_in_air and torso_pos[2] > 2.0:  # Порог высоты (настройте под ваш робот)
             flight_penalty = -2.0  # Жёсткий штраф за полёт
         elif is_in_air:
@@ -367,16 +485,17 @@ class BipedWalkerEnv(gym.Env):
     def exp_reward(self, value: np.float32, max_reward=10.0, scale=0.001):
         return np.min([max_reward, np.exp(scale * value) - 1])
     
-    def deviation_angle(self, torso_pos, torso_orn, dbg=False):
+    def robot_polar_target_pos(self, torso_pos, torso_orn, dbg=True):
         # Вычисляем угол отклонения
         rotation_matrix = np.array(p.getMatrixFromQuaternion(torso_orn), dtype=np.float32).reshape(3, 3)
         forward_vector = rotation_matrix[:, 1]
-        target_vector = np.array(target["pos"][:2]) - np.array(torso_pos[:2],dtype=np.float32)
-        deviation_angle = self.angle_between_vectors(forward_vector[:2], target_vector[:2])
+        target_vector = np.array(self.target.pos[:2]) - np.array(torso_pos[:2],dtype=np.float32)
+        angle = self.angle_between_vectors(forward_vector[:2], target_vector[:2])
+        r = np.linalg.norm(torso_pos[:2]-self.target.pos[:2])
 
         if dbg:
             # Вектор "вперёд" (красный)
-            p.addUserDebugLine(
+            fv = p.addUserDebugLine(
                 torso_pos, 
                 [torso_pos[0] + forward_vector[0], 
                   torso_pos[1] + forward_vector[1], 
@@ -387,15 +506,15 @@ class BipedWalkerEnv(gym.Env):
             )
 
             # Вектор к цели (зелёный)
-            p.addUserDebugLine(
+            tv = p.addUserDebugLine(
                 torso_pos, 
-                [target["pos"][0], target["pos"][1], torso_pos[2]], 
+                [self.target.pos[0], self.target.pos[1], torso_pos[2]], 
                 [0, 1, 0], 
                 2, 
                 lifeTime=1./240.
             )
 
-        return deviation_angle
+        return  r, angle
     
     def angle_between_vectors(self, v1: np.float32, v2: np.float32):
         # Нормализуем вектора
@@ -414,8 +533,8 @@ class BipedWalkerEnv(gym.Env):
         times = 1
 
         if times < 1:
-            for i in range(p.getNumJoints(self.robot)):
-                info = p.getJointInfo(self.robot, i)
+            for i in range(p.getNumJoints(self.robot_id)):
+                info = p.getJointInfo(self.robot_id, i)
                 print(f"Joint ID: {i}, Name: {info[1].decode('utf-8')}, Link: {info[12].decode('utf-8')}")
                 
 

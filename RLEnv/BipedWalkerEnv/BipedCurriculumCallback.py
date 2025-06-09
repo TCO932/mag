@@ -26,10 +26,10 @@ class CurriculumCallback(BaseCallback):
                 mean_reward = np.mean(rewards[-100:])  # Last 100 episodes
                 if mean_reward >= self.reward_threshold and self.phase == 0:
                     self.phase = 1
-                    self.env.env_method("set_phase", 1)  # Переключаем среду на режим ходьбы
+                    self.env.env_method("set_phase", 1)  # Переключаем среду на усложненный режим ходьбы
                     print("Переход к этапу ходьбы!")
-                elif mean_reward >= 800 and self.phase == 1:
+                elif mean_reward >= -60 and self.phase == 1:
                     self.phase = 2
-                    self.env.env_method("set_phase", 2)  # Переключаем на повороты
+                    self.env.env_method("set_phase", 2)  # Переключаем среду на режим ходьбы
                     print("Переход к этапу поворотов!")
         return True
