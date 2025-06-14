@@ -28,12 +28,12 @@ gym.register(
 gym.register(  
     id="BipedWalkerCustom-v2-stage-3",  
     entry_point="BipedWalkerEnv-v1:BipedWalkerEnv",
-    max_episode_steps=1000,  
+    max_episode_steps=3000,
     kwargs={"curriculum_stage":3}
 )
 gym.register(  
     id="BipedWalkerCustom-v2-stage-4",  
     entry_point="BipedWalkerEnv-v1:BipedWalkerEnv",
-    max_episode_steps=1000,  
+    max_episode_steps=3000,  
     kwargs={"curriculum_stage":4}
 )

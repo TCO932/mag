@@ -7,7 +7,7 @@ import time
 
 
 class Target():
-    def __init__(self, pos=np.array([0., 3., 0.])):
+    def __init__(self, pos=np.array([0., 3., 0.]), seed=None):
         self.pos = pos
         self.id = p.addUserDebugLine(
             self.pos, 
@@ -15,10 +15,14 @@ class Target():
             lineColorRGB=[1, 0, 0],             # Цвет (R, G, B) от 0 до 1
             lineWidth=2,                        # Толщина линии
         )
+        self.rng = np.random.RandomState(seed)
 
     def randomize_target_pos(self, max_dist=5, angle1=-np.pi,angle2=np.pi):
-        dist = np.random.randint(2, max_dist)
-        angle = np.random.uniform(angle1, angle2)
+        angle1 = angle1 + np.pi/2 # угол от оси Y
+        angle2 = angle2 + np.pi/2 # угол от оси Y
+        # dist = np.random.randint(2, max_dist)
+        dist = 4 
+        angle = self.rng.uniform(angle1, angle2)
         self.pos = np.array([dist * np.cos(angle), dist * np.sin(angle), 0])
 
         p.addUserDebugLine(
@@ -29,7 +33,51 @@ class Target():
             replaceItemUniqueId=self.id  
         )
 
-max_force = 100
+def cam_init():
+    cam_dist_slider = p.addUserDebugParameter(
+        paramName="cameraDistance",
+        rangeMin=1,
+        rangeMax=15,
+        startValue=8
+    )
+    cam_yaw_slider = p.addUserDebugParameter(
+        paramName="cameraYaw",
+        rangeMin=-90,
+        rangeMax=90,
+        startValue=50
+    )
+    cam_pitch_slider = p.addUserDebugParameter(
+        paramName="cameraPitch",
+        rangeMin=-90,
+        rangeMax=90,
+        startValue=-30
+    )
+    trg_pos = [0, 3, 0]
+    trg_pos_names = ["_x", "_y", "_z"]
+    trg_pos_sliders = [
+        p.addUserDebugParameter(
+            paramName=trg_pos_names[i],
+            rangeMin=-5,
+            rangeMax=5,
+            startValue=trg_pos[i]
+        ) for i in range(len(trg_pos))
+    ]
+
+    def cam_upd():
+        cameraDistance = p.readUserDebugParameter(cam_dist_slider)
+        cameraYaw = p.readUserDebugParameter(cam_yaw_slider)
+        cameraPitch = p.readUserDebugParameter(cam_pitch_slider)
+        cameraTargetPosition = [
+            p.readUserDebugParameter(trg_pos_sliders[i]) for i in range(len(trg_pos_sliders))
+        ]
+        p.resetDebugVisualizerCamera(
+            cameraDistance=cameraDistance, 
+            cameraYaw=cameraYaw,
+            cameraPitch=cameraPitch, 
+            cameraTargetPosition=cameraTargetPosition
+        )
+
+    return cam_upd
 
 class BipedWalkerEnv(gym.Env):
 
@@ -55,6 +103,7 @@ class BipedWalkerEnv(gym.Env):
         if self.render_mode == "human":
             self.create_toggle_btn()
             self.create_joint_sliders()
+            self.cam_upd = cam_init()
         self.debug()
 
         p.setGravity(0, 0, -9.81)
@@ -102,7 +151,8 @@ class BipedWalkerEnv(gym.Env):
 
         # --- Цель для этапа 4 ---
         if self.curriculum_stage == 4:
-            self.target.randomize_target_pos()
+            self.target.rng = self.np_random
+            self.target.randomize_target_pos(angle1=-np.pi/6, angle2=np.pi/6)
 
             # Получаем начальную позицию робота
             torso_pos, _ = p.getBasePositionAndOrientation(self.robot_id)
@@ -151,10 +201,12 @@ class BipedWalkerEnv(gym.Env):
         }
 
         
-        if self.render_mode == "human" and self.rtk > 0:
-            time_to_wait = (self.rtk / 240.0) - sim_drt
-            if time_to_wait > 0:
-                time.sleep(time_to_wait)
+        if self.render_mode == "human":
+            self.cam_upd()
+            if self.rtk > 0:
+                time_to_wait = (self.rtk / 240.0) - sim_drt
+                if time_to_wait > 0:
+                    time.sleep(time_to_wait)
 
         return obs, reward, done, truncated, info
 
@@ -544,31 +596,51 @@ class BipedWalkerEnv(gym.Env):
         self.phase = phase
 
     def render(self):
+        # Этот метод вызывается только если render_mode='rgb_array'
         if self.render_mode != "rgb_array":
             return None
-        
+
         width, height = 640, 480
+        
+        # Получаем позицию торса, чтобы камера следовала за ним
+        torso_pos, _ = p.getBasePositionAndOrientation(self.robot_id)
+        
         # Настройки камеры
-        view_matrix = p.computeViewMatrix(
-            cameraEyePosition=[1, 1, 1],
-            cameraTargetPosition=[0, 0, 0],
-            cameraUpVector=[0, 0, 1]
-        )
-        proj_matrix = p.computeProjectionMatrixFOV(
-            fov=60, aspect=width/height,
-            nearVal=0.1, farVal=100.0
+        view_matrix = p.computeViewMatrixFromYawPitchRoll(
+            cameraTargetPosition=torso_pos, # Камера смотрит на торс робота
+            distance=5.0,                  # Расстояние от камеры до робота
+            yaw=90,                        # Угол поворота камеры вокруг вертикальной оси
+            pitch=-20,                     # Угол наклона камеры
+            roll=0,
+            upAxisIndex=2
         )
         
-        # Получаем кадр
-        _, _, rgb, _, _ = p.getCameraImage(
+        proj_matrix = p.computeProjectionMatrixFOV(
+            fov=60, 
+            aspect=float(width)/height,
+            nearVal=0.1, 
+            farVal=100.0
+        )
+        
+        # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
+        # 1. Получаем все нужные данные из PyBullet, включая width, height и плоский список пикселей
+        img_width, img_height, rgb_pixels, _, _ = p.getCameraImage(
             width, height,
             viewMatrix=view_matrix,
             projectionMatrix=proj_matrix,
             renderer=p.ER_BULLET_HARDWARE_OPENGL
         )
         
-        # Переводим из RGB (PyBullet) в BGR (OpenCV)
-        return rgb[:, :, :3]  # Убираем альфа-канал
-
+        # 2. Преобразуем плоский список пикселей в массив NumPy
+        rgb_array = np.array(rgb_pixels, dtype=np.uint8)
+        
+        # 3. Меняем форму массива на (height, width, 4), так как PyBullet возвращает RGBA
+        rgb_array = rgb_array.reshape((img_height, img_width, 4))
+        
+        # 4. Теперь, когда у нас есть правильный массив, мы можем убрать альфа-канал
+        rgb_array_rgb = rgb_array[:, :, :3]
+        
+        return rgb_array_rgb
+    
     def close(self):
         p.disconnect()
