@@ -4,7 +4,21 @@ import pybullet as p
 import numpy as np
 import pybullet_data  # Модуль со встроенными моделями
 import time
+from threading import Thread
 
+
+class RenderThread(Thread):
+    def __init__(self, env):
+        super().__init__()
+        self.env = env
+        self.frame = None
+        
+    def run(self):
+        while self.env.running:
+            self.frame = self.env._render_internal()
+            
+    def get_frame(self):
+        return self.frame
 
 class Target():
     def __init__(self, pos=np.array([0., 3., 0.]), seed=None):
@@ -88,6 +102,7 @@ class BipedWalkerEnv(gym.Env):
             "render_fps": 30,  # Optional: framerate for rendering
         }
         self.render_mode = render_mode
+        self.running = True  # Флаг для управления потоком
         # Загрузка модели
         self.physics_client = p.connect(
             p.DIRECT if self.render_mode != "human" else p.GUI)
@@ -104,6 +119,9 @@ class BipedWalkerEnv(gym.Env):
             self.create_toggle_btn()
             self.create_joint_sliders()
             self.cam_upd = cam_init()
+        elif self.render_mode == "rgb_array":
+            self.render_thread = RenderThread(self)
+            self.render_thread.start()
         self.debug()
 
         p.setGravity(0, 0, -9.81)
@@ -596,51 +614,58 @@ class BipedWalkerEnv(gym.Env):
         self.phase = phase
 
     def render(self):
-        # Этот метод вызывается только если render_mode='rgb_array'
         if self.render_mode != "rgb_array":
             return None
+            
+        if hasattr(self, 'render_thread'):
+            return self.render_thread.get_frame()  # Получаем кадр из потока
+        return None
 
-        width, height = 640, 480
+    def _render_internal(self):
+        # Оптимизированное разрешение
+        width, height = 320, 240
         
-        # Получаем позицию торса, чтобы камера следовала за ним
         torso_pos, _ = p.getBasePositionAndOrientation(self.robot_id)
         
-        # Настройки камеры
+        # Кэширование view_matrix если позиция не меняется сильно
         view_matrix = p.computeViewMatrixFromYawPitchRoll(
-            cameraTargetPosition=torso_pos, # Камера смотрит на торс робота
-            distance=5.0,                  # Расстояние от камеры до робота
-            yaw=90,                        # Угол поворота камеры вокруг вертикальной оси
-            pitch=-20,                     # Угол наклона камеры
+            cameraTargetPosition=torso_pos,
+            distance=5.0,
+            yaw=90,
+            pitch=-20,
             roll=0,
             upAxisIndex=2
         )
         
-        proj_matrix = p.computeProjectionMatrixFOV(
-            fov=60, 
-            aspect=float(width)/height,
-            nearVal=0.1, 
-            farVal=100.0
-        )
+        # Кэширование проекционной матрицы
+        if not hasattr(self, 'proj_matrix'):
+            self.proj_matrix = p.computeProjectionMatrixFOV(
+                fov=60, 
+                aspect=float(width)/height,
+                nearVal=0.1, 
+                farVal=100.0
+            )
         
-        # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
-        # 1. Получаем все нужные данные из PyBullet, включая width, height и плоский список пикселей
-        img_width, img_height, rgb_pixels, _, _ = p.getCameraImage(
+        # Упрощенная визуализация
+        p.configureDebugVisualizer(p.COV_ENABLE_SHADOWS, 0)
+        p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 1)
+        p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0)
+        
+        # Быстрый рендерер
+        _, _, rgb_pixels, _, _ = p.getCameraImage(
             width, height,
             viewMatrix=view_matrix,
-            projectionMatrix=proj_matrix,
-            renderer=p.ER_BULLET_HARDWARE_OPENGL
+            projectionMatrix=self.proj_matrix,
+            renderer=p.ER_TINY_RENDERER  # Или p.ER_BULLET_HARDWARE_OPENGL
         )
         
-        # 2. Преобразуем плоский список пикселей в массив NumPy
-        rgb_array = np.array(rgb_pixels, dtype=np.uint8)
-        
-        # 3. Меняем форму массива на (height, width, 4), так как PyBullet возвращает RGBA
-        rgb_array = rgb_array.reshape((img_height, img_width, 4))
-        
-        # 4. Теперь, когда у нас есть правильный массив, мы можем убрать альфа-канал
-        rgb_array_rgb = rgb_array[:, :, :3]
-        
-        return rgb_array_rgb
+        # Оптимизированное преобразование
+        rgb_array = np.frombuffer(rgb_pixels, dtype=np.uint8)
+        return rgb_array.reshape((height, width, 4))[:, :, :3]
+
     
     def close(self):
+        self.running = False  # Останавливаем поток
+        if hasattr(self, 'render_thread'):
+            self.render_thread.join()  # Ждем завершения потока
         p.disconnect()
